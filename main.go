@@ -125,7 +125,7 @@ func render() {
 				}
 			}
 			errorPerSecond := levelProcessed.Error / slidingWindow
-			fmt.Printf("Dynamic Insights:\n• Error Rate: %d errors/sec\n• Emerging Pattern: \"Database connection failed\" spiked 450%% in last 15 sec\n• Top Errors:\n  1. %s (%d occurrences)\n  2. %s (%d occurrences)\n  3. %s (%d occurrences)",
+			fmt.Printf("Dynamic Insights:\n• Error Rate: %d errors/sec\n• Top Errors:\n  1. %s (%d occurrences)\n  2. %s (%d occurrences)\n  3. %s (%d occurrences)",
 				errorPerSecond, topErrorsMsgs[0], topErrorsCounts[0], topErrorsMsgs[1], topErrorsCounts[1], topErrorsMsgs[2], topErrorsCounts[2])
 
 			if entiresPerSecond > 2500 {
