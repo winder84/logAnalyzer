@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	logsChan = make(chan *tail.Line)
+	logsChan = make(chan *tail.Line, 10000)
 
 	slidingWindow    int = 60
 	allEntires       int
@@ -113,18 +113,15 @@ func render() {
 
 			for k, v := range errorMsgsProcessed {
 				switch {
-				case v > topErrorsCounts[0]:
+				case v > topErrorsCounts[0] && k != topErrorsMsgs[1] && k != topErrorsMsgs[2]:
 					topErrorsMsgs[0] = k
 					topErrorsCounts[0] = v
-					break
-				case v > topErrorsCounts[1]:
+				case v > topErrorsCounts[1] && k != topErrorsMsgs[0] && k != topErrorsMsgs[2]:
 					topErrorsMsgs[1] = k
 					topErrorsCounts[1] = v
-					break
-				case v > topErrorsCounts[2]:
+				case v > topErrorsCounts[2] && k != topErrorsMsgs[0] && k != topErrorsMsgs[1]:
 					topErrorsMsgs[2] = k
 					topErrorsCounts[2] = v
-					break
 				}
 			}
 			errorPerSecond := levelProcessed.Error / slidingWindow
