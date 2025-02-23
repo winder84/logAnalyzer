@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"flag"
 	"fmt"
 	"github.com/nxadm/tail"
 	"os"
@@ -44,12 +46,17 @@ type RenderData struct {
 	DebugCount     int
 
 	TopErrors []*TopError
+
+	QueueSize int
 }
 
 var (
 	logData      chan *Log
 	renderResult chan RenderData
 	start        time.Time
+
+	debugMode bool
+	logFile   string
 )
 
 const (
@@ -63,13 +70,16 @@ const (
 )
 
 func main() {
+	flag.BoolVar(&debugMode, "debug", false, "debug mode")
+	flag.StringVar(&logFile, "log_file", "", "get logs from file")
+	flag.Parse()
 	signalChan := make(chan os.Signal, 1)
 	logData = make(chan *Log, 10000)
 	renderResult = make(chan RenderData)
 
-	//for i := 0; i < 2; i++ {
-	go readLogs()
-	//}
+	for i := 0; i < runtime.NumCPU(); i++ {
+		go readLogs()
+	}
 	go analyze()
 	go render()
 
@@ -77,17 +87,32 @@ func main() {
 }
 
 func readLogs() {
-	t, err := tail.TailFile("test_logs.log", tail.Config{Follow: true})
-	if err != nil {
-		panic(err)
-	}
+	if logFile != "" {
+		t, err := tail.TailFile("test_logs.log", tail.Config{Follow: true})
+		if err != nil {
+			panic(err)
+		}
 
-	for line := range t.Lines {
-		_, level, msg := parseLine(line.Text)
-		logData <- &Log{
-			Type: level,
-			Msg:  msg,
-			Time: line.Time,
+		for line := range t.Lines {
+			logTime, level, msg := parseLine(line.Text)
+			parsedTime, _ := time.Parse("2006-01-02T15:04:05Z", logTime[1:len(logTime)-1])
+			logData <- &Log{
+				Type: level,
+				Msg:  msg,
+				Time: parsedTime,
+			}
+		}
+	} else {
+		var reader = bufio.NewReader(os.Stdin)
+		for {
+			message, _ := reader.ReadString('\n')
+			logTime, level, msg := parseLine(message)
+			parsedTime, _ := time.Parse("2006-01-02T15:04:05Z", logTime[1:len(logTime)-1])
+			logData <- &Log{
+				Type: level,
+				Msg:  msg,
+				Time: parsedTime,
+			}
 		}
 	}
 
@@ -103,7 +128,7 @@ func analyze() {
 		case <-timeSecondTicker:
 			renderData := RenderData{}
 			topErrors := make(map[string]int, 100)
-			if time.Now().Sub(start).Seconds() <= medWindowSize {
+			if int(time.Now().Sub(start).Seconds()) <= slidingWindow {
 				slidingWindow = int(time.Now().Sub(start).Seconds())
 			}
 			for logTime, logArray := range mapToAnalyze {
@@ -141,6 +166,7 @@ func analyze() {
 			} else {
 				slidingWindow = medWindowSize
 			}
+			renderData.QueueSize = len(logData)
 			//fmt.Printf("\r %d - %d - %d", len(logData), allEntriesProcessed, len(mapToAnalyze))
 			renderResult <- renderData
 			timeSecondTicker = time.After(1 * time.Second)
@@ -169,8 +195,13 @@ func render() {
 		fmt.Printf("Pattern Analysis:\n• ERROR: %.2f%% (%d entries)\n• INFO: %.2f%% (%d entries)\n• DEBUG: %.2f%% (%d entries)\n\n",
 			renderData.ErrorPercent, renderData.ErrorCount, renderData.InfoPercent, renderData.InfoCount, renderData.DebugPercent, renderData.DebugCount)
 
-		fmt.Printf("Dynamic Insights:\n• Error Rate: %d errors/sec\n• Top Errors:\n  1. %s (%d occurrences)\n  2. %s (%d occurrences)\n  3. %s (%d occurrences)",
+		fmt.Printf("Dynamic Insights:\n• Error Rate: %d errors/sec\n• Top Errors:\n  1. %s (%d occurrences)\n  2. %s (%d occurrences)\n  3. %s (%d occurrences)\n",
 			renderData.ErrorPerSecond, renderData.TopErrors[0].Msg, renderData.TopErrors[0].Count, renderData.TopErrors[1].Msg, renderData.TopErrors[1].Count, renderData.TopErrors[2].Msg, renderData.TopErrors[2].Count)
+
+		if debugMode {
+			fmt.Printf("\nDebug:\n• Queue Size: %d \n", renderData.QueueSize)
+		}
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nPress Ctrl+C to exit")
 	}
 }
 
