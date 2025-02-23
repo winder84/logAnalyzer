@@ -6,43 +6,74 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
+type Log struct {
+	Type string
+	Msg  string
+	Time time.Time
+}
+
+type Pair struct {
+	key   string
+	value int
+}
+
+type TopError struct {
+	Msg   string
+	Count int
+}
+
+type PairList []Pair
+
+type RenderData struct {
+	AllEntriesProcessed int
+	CurrentRate         int
+	PeakRate            int
+	SlidingWindow       int
+
+	ErrorPerSecond int
+	ErrorPercent   float64
+	ErrorCount     int
+	InfoPercent    float64
+	InfoCount      int
+	DebugPercent   float64
+	DebugCount     int
+
+	TopErrors []*TopError
+}
+
 var (
-	logsChan = make(chan *tail.Line, 10000)
-
-	slidingWindow    int = 60
-	allEntires       int
-	entiresProcessed int
-	entiresPeak      int
-
-	levelProcessed LevelsCount
-
-	errorMsgsProcessed = make(map[string]int)
-	topErrorsMsgs      [3]string
-	topErrorsCounts    [3]int
-
-	mu sync.Mutex
+	logData      chan *Log
+	renderResult chan RenderData
+	start        time.Time
 )
 
-type LevelsCount struct {
-	Debug int
-	Info  int
-	Error int
-}
+const (
+	minWindowSize = 30
+	medWindowSize = 60
+	maxWindowSize = 120
+
+	ErrorType = "ERROR"
+	DebugType = "DEBUG"
+	InfoType  = "INFO"
+)
 
 func main() {
 	signalChan := make(chan os.Signal, 1)
+	logData = make(chan *Log, 10000)
+	renderResult = make(chan RenderData)
 
+	//for i := 0; i < 2; i++ {
 	go readLogs()
+	//}
 	go analyze()
 	go render()
 
 	<-signalChan
-	fmt.Println("\nCtrl+C pressed, exiting...")
 }
 
 func readLogs() {
@@ -52,92 +83,94 @@ func readLogs() {
 	}
 
 	for line := range t.Lines {
-		logsChan <- line
+		_, level, msg := parseLine(line.Text)
+		logData <- &Log{
+			Type: level,
+			Msg:  msg,
+			Time: line.Time,
+		}
 	}
 
 }
 
 func analyze() {
+	timeSecondTicker := time.After(1 * time.Second)
+	start = time.Now()
+	slidingWindow := medWindowSize
+	mapToAnalyze := make(map[time.Time][]Log, 120)
 	for {
-		mu.Lock()
-		line := <-logsChan
-		_, level, msg := parseLine(line.Text)
-
-		if level == "ERROR" {
-			levelProcessed.Error++
+		select {
+		case <-timeSecondTicker:
+			renderData := RenderData{}
+			topErrors := make(map[string]int, 100)
+			if time.Now().Sub(start).Seconds() <= medWindowSize {
+				slidingWindow = int(time.Now().Sub(start).Seconds())
+			}
+			for logTime, logArray := range mapToAnalyze {
+				if int(time.Now().Sub(logTime).Seconds()) > slidingWindow {
+					delete(mapToAnalyze, logTime)
+					continue
+				}
+				for _, log := range logArray {
+					renderData.AllEntriesProcessed++
+					renderData.CurrentRate = renderData.AllEntriesProcessed / slidingWindow
+					if renderData.PeakRate < renderData.CurrentRate {
+						renderData.PeakRate = renderData.CurrentRate
+					}
+					renderData.SlidingWindow = slidingWindow
+					switch log.Type {
+					case ErrorType:
+						renderData.ErrorCount++
+						renderData.ErrorPerSecond = renderData.ErrorCount / slidingWindow
+						renderData.ErrorPercent = (float64(renderData.ErrorCount) / float64(renderData.AllEntriesProcessed)) * 100
+						topErrors[log.Msg]++
+					case InfoType:
+						renderData.InfoCount++
+						renderData.InfoPercent = (float64(renderData.InfoCount) / float64(renderData.AllEntriesProcessed)) * 100
+					case DebugType:
+						renderData.DebugCount++
+						renderData.DebugPercent = (float64(renderData.DebugCount) / float64(renderData.AllEntriesProcessed)) * 100
+					}
+				}
+				renderData.TopErrors = topThree(topErrors)
+			}
+			if renderData.CurrentRate > 2500 {
+				slidingWindow = minWindowSize
+			} else if renderData.CurrentRate < 600 {
+				slidingWindow = maxWindowSize
+			} else {
+				slidingWindow = medWindowSize
+			}
+			//fmt.Printf("\r %d - %d - %d", len(logData), allEntriesProcessed, len(mapToAnalyze))
+			renderResult <- renderData
+			timeSecondTicker = time.After(1 * time.Second)
+		case log := <-logData:
+			mapToAnalyze[log.Time] = append(mapToAnalyze[log.Time], Log{
+				Type: log.Type,
+				Msg:  log.Msg,
+				Time: log.Time,
+			})
 		}
-
-		if level == "INFO" {
-			levelProcessed.Info++
-		}
-
-		if level == "DEBUG" {
-			levelProcessed.Debug++
-		}
-
-		if msg != "" {
-			errorMsgsProcessed[msg]++
-		}
-
-		allEntires++
-		entiresProcessed++
-
-		mu.Unlock()
 	}
-
 }
 
 func render() {
 	for {
-		mu.Lock()
-		if entiresProcessed > 0 && len(errorMsgsProcessed) > 2 {
-			time.Sleep(1 * time.Second)
-			clearScreen()
-			entiresPerSecond := allEntires / slidingWindow
-			if entiresPeak < entiresPerSecond {
-				entiresPeak = entiresPerSecond
-			}
-			now := time.Now()
-			timeZone, _ := now.Zone()
-			formattedTime := now.Format("2006-01-02 15:04:05")
-			fmt.Printf("\n\n\nLog Analysis Report (Last Updated: %s %s)\n", formattedTime, timeZone)
-			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-			fmt.Printf("Runtime Stats:\n• Entries Processed: %d\n• Current Rate: %d entries/sec (Peak: %d entries/sec)\n• Adaptive Window: %d sec (Adjusted from 60 sec)\n\n",
-				allEntires, entiresPerSecond, entiresPeak, slidingWindow)
+		renderData := <-renderResult
+		clearScreen()
+		now := time.Now()
+		timeZone, _ := now.Zone()
+		formattedTime := now.Format("2006-01-02 15:04:05")
+		fmt.Printf("\n\n\nLog Analysis Report (Last Updated: %s %s)\n", formattedTime, timeZone)
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Printf("Runtime Stats:\n• Entries Processed: %d\n• Current Rate: %d entries/sec (Peak: %d entries/sec)\n• Adaptive Window: %d sec (Adjusted from 60 sec)\n\n",
+			renderData.AllEntriesProcessed, renderData.CurrentRate, renderData.PeakRate, renderData.SlidingWindow)
 
-			errorsPercent := (100 * levelProcessed.Error) / entiresProcessed
-			infosPercent := (100 * levelProcessed.Info) / entiresProcessed
-			debugsPercent := (100 * levelProcessed.Debug) / entiresProcessed
-			fmt.Printf("Pattern Analysis:\n• ERROR: %d%% (%d entries)\n• INFO: %d%% (%d entries)\n• DEBUG: %d%% (%d entries)\n\n",
-				errorsPercent, levelProcessed.Error, infosPercent, levelProcessed.Info, debugsPercent, levelProcessed.Debug)
+		fmt.Printf("Pattern Analysis:\n• ERROR: %.2f%% (%d entries)\n• INFO: %.2f%% (%d entries)\n• DEBUG: %.2f%% (%d entries)\n\n",
+			renderData.ErrorPercent, renderData.ErrorCount, renderData.InfoPercent, renderData.InfoCount, renderData.DebugPercent, renderData.DebugCount)
 
-			for k, v := range errorMsgsProcessed {
-				switch {
-				case v > topErrorsCounts[0] && k != topErrorsMsgs[1] && k != topErrorsMsgs[2]:
-					topErrorsMsgs[0] = k
-					topErrorsCounts[0] = v
-				case v > topErrorsCounts[1] && k != topErrorsMsgs[0] && k != topErrorsMsgs[2]:
-					topErrorsMsgs[1] = k
-					topErrorsCounts[1] = v
-				case v > topErrorsCounts[2] && k != topErrorsMsgs[0] && k != topErrorsMsgs[1]:
-					topErrorsMsgs[2] = k
-					topErrorsCounts[2] = v
-				}
-			}
-			errorPerSecond := levelProcessed.Error / slidingWindow
-			fmt.Printf("Dynamic Insights:\n• Error Rate: %d errors/sec\n• Top Errors:\n  1. %s (%d occurrences)\n  2. %s (%d occurrences)\n  3. %s (%d occurrences)",
-				errorPerSecond, topErrorsMsgs[0], topErrorsCounts[0], topErrorsMsgs[1], topErrorsCounts[1], topErrorsMsgs[2], topErrorsCounts[2])
-
-			if entiresPerSecond > 2500 {
-				slidingWindow = 30
-			} else if entiresPerSecond < 600 {
-				slidingWindow = 120
-			} else {
-				slidingWindow = 60
-			}
-
-		}
-		mu.Unlock()
+		fmt.Printf("Dynamic Insights:\n• Error Rate: %d errors/sec\n• Top Errors:\n  1. %s (%d occurrences)\n  2. %s (%d occurrences)\n  3. %s (%d occurrences)",
+			renderData.ErrorPerSecond, renderData.TopErrors[0].Msg, renderData.TopErrors[0].Count, renderData.TopErrors[1].Msg, renderData.TopErrors[1].Count, renderData.TopErrors[2].Msg, renderData.TopErrors[2].Count)
 	}
 }
 
@@ -159,4 +192,36 @@ func clearScreen() {
 	}
 	cmd.Stdout = os.Stdout
 	_ = cmd.Run()
+}
+
+func (p PairList) Len() int {
+	return len(p)
+}
+func (p PairList) Less(i, j int) bool {
+	return p[i].value < p[j].value
+}
+func (p PairList) Swap(i, j int) {
+	p[i], p[j] = p[j], p[i]
+}
+func topThree(m map[string]int) []*TopError {
+	pl := make(PairList, len(m))
+	i := 0
+	for k, v := range m {
+		pl[i] = Pair{k, v}
+		i++
+	}
+
+	sort.Sort(sort.Reverse(pl))
+	var topKeys []*TopError
+	n := len(m)
+	if n > 3 {
+		n = 3
+	}
+	for i := 0; i < n; i++ {
+		topKeys = append(topKeys, &TopError{
+			Msg:   pl[i].key,
+			Count: pl[i].value,
+		})
+	}
+	return topKeys
 }
