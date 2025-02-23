@@ -1,2 +1,2 @@
 Use flag -debug for additional info <br>
-Use flag -log_file to specify log file
+use a flag -log_file to specify a log file, otherwise the script will accept a stream from stdin
